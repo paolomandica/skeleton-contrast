@@ -17,7 +17,7 @@ import torch.optim
 import torch.utils.data
 
 
-import moco.builder_inter
+import models.builder_inter
 from torch.utils.tensorboard import SummaryWriter
 from dataset import get_pretraining_set_inter
 
@@ -60,14 +60,16 @@ parser.add_argument('--protocol', default='cross_subject', type=str,
                     help='traiining protocol cross_view/cross_subject/cross_setup')
 
 # moco specific configs:
-parser.add_argument('--moco-dim', default=128, type=int,
+parser.add_argument('--dim', default=128, type=int,
                     help='feature dimension (default: 128)')
+parser.add_argument('--pred-dim', default=512, type=int,
+                    help='predictor hidden feature dimension (default: 512)')
 parser.add_argument('--moco-k', default=16384, type=int,
                     help='queue size; number of negative keys (default: 16384)')
 parser.add_argument('--moco-m', default=0.999, type=float,
                     help='moco momentum of updating key encoder (default: 0.999)')
-parser.add_argument('--moco-t', default=0.07, type=float,
-                    help='softmax temperature (default: 0.07)')
+parser.add_argument('-t', '--temp', default=0.07, type=float,
+                    help='softmax temperature (default: 0.07)', dest='T')
 parser.add_argument('--mlp', action='store_true',
                     help='use mlp head')
 parser.add_argument('--cos', action='store_true',
@@ -118,8 +120,10 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model")
 
-    model = moco.builder_inter.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
-                                    opts.hcn_model_args, args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
+    # model = models.builder_inter.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
+    #                                 opts.hcn_model_args, args.dim, args.moco_k, args.moco_m, args.T, args.mlp)
+    model = models.builder_inter.SimSiam(
+        opts.bi_gru_model_args, opts.agcn_model_args, args.dim, args.pred_dim, args.T, args.mlp)
 
     print(model)
     print("options", opts.train_feeder_args)

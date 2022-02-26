@@ -18,7 +18,7 @@ import torch.optim
 import torch.utils.data
 
 
-import moco.builder_intra
+import models.builder_intra
 from torch.utils.tensorboard import SummaryWriter
 from dataset import get_pretraining_set_intra
 
@@ -120,7 +120,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model")
 
-    model = moco.builder_intra.MoCo(args.skeleton_representation,opts.bi_gru_model_args,opts.agcn_model_args,opts.hcn_model_args,args.moco_dim,args.moco_k,args.moco_m,args.moco_t,args.mlp)
+    model = models.builder_intra.MoCo(args.skeleton_representation,opts.bi_gru_model_args,opts.agcn_model_args,opts.hcn_model_args,args.moco_dim,args.moco_k,args.moco_m,args.moco_t,args.mlp)
     print("options",opts.train_feeder_args)
     print(model)
 

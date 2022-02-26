@@ -28,9 +28,9 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn import preprocessing
 from sklearn.metrics import accuracy_score
 
-from moco.GRU import *
-from moco.HCN import HCN
-from moco.AGCN import Model as AGCN
+from models.GRU import *
+from models.HCN import HCN
+from models.AGCN import Model as AGCN
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # change for action recogniton
