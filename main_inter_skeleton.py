@@ -20,6 +20,7 @@ import torch.utils.data
 import models.builder_inter
 from torch.utils.tensorboard import SummaryWriter
 from dataset import get_pretraining_set_inter
+from models.sim_loss import CosineSimLoss
 
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -56,7 +57,7 @@ parser.add_argument('--skeleton-representation', type=str,
                     help='pair of skeleton-representations to use for self supervised training (seq-based_and_graph-based or graph-based_and_image-based or seq-based_and_image-based ) ')
 parser.add_argument('--pre-dataset', default='ntu60', type=str,
                     help='which dataset to use for self supervised training (ntu60 or ntu120)')
-parser.add_argument('--protocol', default='cross_subject', type=str,
+parser.add_argument('--protocol', default='cross_view', type=str,
                     help='traiining protocol cross_view/cross_subject/cross_setup')
 
 # moco specific configs:
@@ -74,6 +75,9 @@ parser.add_argument('--mlp', action='store_true',
                     help='use mlp head')
 parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
+
+parser.add_argument('--model', default='moco', type=str,
+                    help='type of pretraining architecture: moco (default) | simsiam')
 
 
 def main():
@@ -120,10 +124,14 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model")
 
-    # model = models.builder_inter.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
-    #                                 opts.hcn_model_args, args.dim, args.moco_k, args.moco_m, args.T, args.mlp)
-    model = models.builder_inter.SimSiam(
-        opts.bi_gru_model_args, opts.agcn_model_args, args.dim, args.pred_dim, args.T, args.mlp)
+    if args.model == "moco":
+        model = models.builder_inter.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
+                                          opts.hcn_model_args, args.dim, args.moco_k, args.moco_m, args.T, args.mlp)
+    elif args.model == "simsiam":
+        model = models.builder_inter.SimSiam(
+            opts.bi_gru_model_args, opts.agcn_model_args, args.dim, args.pred_dim, args.mlp)
+    else:
+        raise ValueError("model must be moco or simsiam")
 
     print(model)
     print("options", opts.train_feeder_args)
@@ -139,6 +147,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    sim_loss = CosineSimLoss().cuda(args.gpu)
+    # sim_loss = nn.CosineSimilarity()
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -183,7 +193,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        loss, acc1, acc2 = train(train_loader, model, criterion, optimizer, epoch, args)
+        loss, acc1, acc2 = train(train_loader, model, criterion, sim_loss, optimizer, epoch, args)
         writer.add_scalar('train_loss', loss.avg, global_step=epoch)
         writer.add_scalar('acc_s1', acc1.avg, global_step=epoch)
         writer.add_scalar('acc_s2', acc2.avg, global_step=epoch)
@@ -196,15 +206,17 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best=False, filename=args.checkpoint_path+'/checkpoint_{:04d}.pth.tar'.format(epoch))
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, criterion, sim_loss, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
+    losses = AverageMeter('Loss', ':.4f')
     s1_top1 = AverageMeter('S1_Acc@1', ':6.2f')
     s2_top1 = AverageMeter('S2_Acc@1', ':6.2f')
+    meters = [batch_time, losses]
+    if args.model == 'moco':
+        meters += [s1_top1, s2_top1]
     progress = ProgressMeter(
-        len(train_loader),
-        [batch_time, losses, s1_top1, s2_top1],
+        len(train_loader), meters,
         prefix="Epoch: [{}] Lr_rate [{}]".format(epoch, optimizer.param_groups[0]['lr']))
 
     # switch to train mode
@@ -223,27 +235,40 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             inputs[3] = inputs[3].float().cuda(args.gpu, non_blocking=True)
         # print(inputs[0].type(),inputs[1].type())
 
-        # compute output
-        output, target = model(inputs[0], inputs[1], inputs[2], inputs[3])
+        if args.model == 'moco':
+            # compute output
+            output, target = model(inputs[0], inputs[1], inputs[2], inputs[3])
 
-        loss_1 = criterion(output[0], target[0])
-        loss_2 = criterion(output[1], target[1])
-        loss = loss_1 + loss_2
+            loss_1 = criterion(output[0], target[0])
+            loss_2 = criterion(output[1], target[1])
+            loss = loss_1 + loss_2
 
-        batch_size = output[0].size(0)
-        losses.update(loss.item(), batch_size)
+            batch_size = output[0].size(0)
+            losses.update(loss.item(), batch_size)
 
-        # measure accuracy of model s1 and s2 individually
-        # acc1/acc5 are (K+1)-way contrast classifier accuracy
-        # measure accuracy and record loss
-        s1_acc1, _ = accuracy(output[0], target[0], topk=(1, 5))
-        s2_acc1, _ = accuracy(output[1], target[1], topk=(1, 5))
-        s1_top1.update(s1_acc1[0], batch_size)
-        s2_top1.update(s2_acc1[0], batch_size)
+            # measure accuracy of model s1 and s2 individually
+            # acc1/acc5 are (K+1)-way contrast classifier accuracy
+            # measure accuracy and record loss
+            s1_acc1, _ = accuracy(output[0], target[0], topk=(1, 5))
+            s2_acc1, _ = accuracy(output[1], target[1], topk=(1, 5))
+            s1_top1.update(s1_acc1[0], batch_size)
+            s2_top1.update(s2_acc1[0], batch_size)
 
-        #print("input output size",output.size(),images[0].size(),half_size)
+        else:
+            # simsiam case
+            # compute output
+            q, r, k, l = model(inputs[0], inputs[1], inputs[2], inputs[3])
 
-        # compute gradient and do SGD step
+            loss_1 = sim_loss(q[0], l[1]).mean()
+            loss_2 = sim_loss(r[0], k[1]).mean()
+            loss_3 = sim_loss(q[1], l[0]).mean()
+            loss_4 = sim_loss(r[1], k[0]).mean()
+            loss = loss_1 + loss_2 + loss_3 + loss_4
+
+            batch_size = q[0].size(0)
+            losses.update(loss.item(), batch_size)
+
+            # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

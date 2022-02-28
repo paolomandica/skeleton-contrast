@@ -24,7 +24,7 @@ class SimSiam(nn.Module):
     Build a SimSiam model with: a query encoder and a key encoder.
     """
 
-    def __init__(self, args_bi_gru, args_agcn, dim=128, pred_dim=512, T=0.07, mlp=False):
+    def __init__(self, args_bi_gru, args_agcn, dim=128, pred_dim=512, mlp=False):
         """
         dim: feature dimension (default: 128)
         pred_dim: hidden dimension of the predictor (default: 128)
@@ -33,8 +33,6 @@ class SimSiam(nn.Module):
         T: softmax temperature (default: 0.07)
         """
         super(SimSiam, self).__init__()
-
-        self.T = T
 
         # create encoders
         self.encoder_seq = BIGRU(**args_bi_gru)
@@ -75,6 +73,18 @@ class SimSiam(nn.Module):
                                            nn.ReLU(inplace=True),  # hidden layer
                                            nn.Linear(pred_dim, dim))  # output layer
 
+    def compute_feat_seq(self, emb):
+        feat = self.encoder_seq(emb)  # queries: NxC
+        feat = nn.functional.normalize(feat, dim=1)
+        feat_pred = self.predictor_seq(feat)
+        return feat, feat_pred
+
+    def compute_feat_gcn(self, emb):
+        feat = self.encoder_gcn(emb)  # queries: NxC
+        feat = nn.functional.normalize(feat, dim=1)
+        feat_pred = self.predictor_gcn(feat)
+        return feat, feat_pred
+
     def forward(self, input_s1_v1, input_s2_v1, input_s1_v2, input_s2_v2):
         """
         Input:
@@ -87,46 +97,37 @@ class SimSiam(nn.Module):
         """
 
         # compute query features for  s1 and  s2 skeleton representations
-        q = self.encoder_seq(input_s1_v1)  # queries: NxC
-        q = nn.functional.normalize(q, dim=1)
-        q = self.predictor_seq(q)
-
-        r = self.encoder_gcn(input_s2_v1)  # queries: NxC
-        r = nn.functional.normalize(r, dim=1)
-        r = self.predictor_gcn(r)
+        q, q_p = self.compute_feat_seq(input_s1_v1)
+        r, r_p = self.compute_feat_gcn(input_s2_v1)
 
         # compute key features for  s1 and  s2  skeleton representations
-        with torch.no_grad():  # no gradient to keys
-            k = self.encoder_seq(input_s1_v2)  # keys: NxC
-            k = nn.functional.normalize(k, dim=1)
+        k, k_p = self.compute_feat_seq(input_s1_v2)
+        l, l_p = self.compute_feat_gcn(input_s2_v2)
 
-            l = self.encoder_gcn(input_s2_v2)  # keys: NxC
-            l = nn.functional.normalize(l, dim=1)
+        return (q.detach(), q_p), (r.detach(), r_p), (k.detach(), k_p), (l.detach(), l_p)
 
         # compute logits
         # Einstein sum is more intuitive
         # positive logits: Nx1,
         # use  intra-skeleton contrast
-        l_pos_seq = torch.einsum('nc,nc->n', [q, l]).unsqueeze(-1)  # query-s1 key-s2
-        l_pos_graph = torch.einsum('nc,nc->n', [r, k]).unsqueeze(-1)  # query-s2 key-s1
+        # l_pos_seq = torch.einsum('nc,nc->n', [q, l]).unsqueeze(-1)  # query-s1 key-s2
+        # l_pos_graph = torch.einsum('nc,nc->n', [r, k]).unsqueeze(-1)  # query-s2 key-s1
 
-        # TODO
+        # # logits: Nx(1+K)
+        # # logits_seq = torch.cat([l_pos_seq], dim=1)
+        # # logits_graph = torch.cat([l_pos_graph], dim=1)
+        # logits_seq = l_pos_seq
+        # logits_graph = l_pos_graph
 
-        # logits: Nx(1+K)
-        # logits_seq = torch.cat([l_pos_seq], dim=1)
-        # logits_graph = torch.cat([l_pos_graph], dim=1)
-        logits_seq = l_pos_seq
-        logits_graph = l_pos_graph
+        # # apply temperature
+        # logits_seq /= self.T
+        # logits_graph /= self.T
 
-        # apply temperature
-        logits_seq /= self.T
-        logits_graph /= self.T
+        # # labels: positive key indicators
+        # labels_seq = torch.zeros(logits_seq.shape[0], dtype=torch.long).cuda()
+        # labels_graph = torch.zeros(logits_graph.shape[0], dtype=torch.long).cuda()
 
-        # labels: positive key indicators
-        labels_seq = torch.zeros(logits_seq.shape[0], dtype=torch.long).cuda()
-        labels_graph = torch.zeros(logits_graph.shape[0], dtype=torch.long).cuda()
-
-        return (logits_seq, logits_graph), (labels_seq, labels_graph)
+        # return (logits_seq, logits_graph), (labels_seq, labels_graph)
 
 
 class MoCo(nn.Module):

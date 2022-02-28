@@ -30,12 +30,20 @@ python ntu_gendata.py
 
 ### Pretrain Instruction
 
-* e.g Inter-skeleton contrast using seq-based and graph-based representation on cross-view NTU-60
+* e.g Inter-skeleton contrast using moco, seq-based and graph-based representation on cross-view NTU-60
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 python  main_moco_inter_skeleton.py \
+CUDA_VISIBLE_DEVICES=0,1 python main_inter_skeleton.py --model moco \
   --lr 0.01 \
-  --batch-size 64 \
-  --mlp --moco-t 0.07   --moco-k 16384  --checkpoint-path ./checkpoints/ntu_60_cross_view/interskeleton_seq_based_graph_based  --schedule 351  --epochs 451  --pre-dataset ntu60 --skeleton-representation seq-based_and_graph-based --protocol cross_view
+  --batch-size 256 \
+  --mlp --moco-k 16384 --checkpoint-path ./checkpoints/ntu_60_cross_view/interskeleton_moco_seq_based_graph_based  --schedule 351  --epochs 451 --pre-dataset ntu60 --skeleton-representation seq-based_and_graph-based --protocol cross_view
+```
+
+* e.g Inter-skeleton contrast using SimSiam, seq-based and graph-based representation on cross-view NTU-60
+```
+CUDA_VISIBLE_DEVICES=0,1 python main_inter_skeleton.py --model simsiam \
+  --lr 0.001 \
+  --batch-size 256 \
+  --mlp --checkpoint-path ./checkpoints/ntu_60_cross_view/interskeleton_siam_seq_based_graph_based --schedule 351 --epochs 451 --pre-dataset ntu60 --skeleton-representation seq-based_and_graph-based --protocol cross_view
 ```
 * check [script_pretrain.sh](https://github.com/fmthoker/skeleton-contrast/blob/main/script_pretrain.sh) for other pretraining configrations
 
