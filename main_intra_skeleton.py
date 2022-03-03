@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
@@ -15,12 +16,11 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
-import wandb
 
 
-import models.builder_inter
+import models.builder_intra
 from torch.utils.tensorboard import SummaryWriter
-from dataset import get_pretraining_set_inter
+from dataset import get_pretraining_set_intra
 from models.sim_loss import CosineSimLoss
 
 
@@ -36,9 +36,9 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
+parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
-parser.add_argument('--schedule', default=[200, 300], nargs='*', type=int,
+parser.add_argument('--schedule', default=[100, 160], nargs='*', type=int,
                     help='learning rate schedule (when to drop lr by 10x)')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum of SGD solver')
@@ -55,10 +55,10 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--checkpoint-path', default='./checkpoints', type=str)
 parser.add_argument('--skeleton-representation', type=str,
-                    help='pair of skeleton-representations to use for self supervised training (seq-based_and_graph-based or graph-based_and_image-based or seq-based_and_image-based ) ')
+                    help='input skeleton-representation  for self supervised training (image-based or graph-based or seq-based)')
 parser.add_argument('--pre-dataset', default='ntu60', type=str,
                     help='which dataset to use for self supervised training (ntu60 or ntu120)')
-parser.add_argument('--protocol', default='cross_view', type=str,
+parser.add_argument('--protocol', default='cross_subject', type=str,
                     help='traiining protocol cross_view/cross_subject/cross_setup')
 
 # moco specific configs:
@@ -79,8 +79,6 @@ parser.add_argument('--cos', action='store_true',
 
 parser.add_argument('--model', default='moco', type=str,
                     help='type of pretraining architecture: moco (default) | simsiam')
-parser.add_argument('--disable-wandb', default=False, action='store_true',
-                    help='do not visualize with wandb')
 
 
 def main():
@@ -102,6 +100,7 @@ def main():
 
     ngpus_per_node = torch.cuda.device_count()
     # Simply call main_worker function
+
     main_worker(0, ngpus_per_node, args)
 
 
@@ -111,7 +110,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
-    # training dataset
+    # pretraining dataset and protocol
     from options import options_pretraining as options
     if args.pre_dataset == 'ntu60' and args.protocol == 'cross_view':
         opts = options.opts_ntu_60_cross_view()
@@ -122,22 +121,20 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.pre_dataset == 'ntu120' and args.protocol == 'cross_subject':
         opts = options.opts_ntu_120_cross_subject()
 
-    opts.train_feeder_args['input_representations'] = args.skeleton_representation
+    opts.train_feeder_args['input_representation'] = args.skeleton_representation
 
     # create model
     print("=> creating model")
 
     if args.model == "moco":
-        model = models.builder_inter.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
-                                          opts.hcn_model_args, args.dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
+        model = models.builder_intra.MoCo(args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args,
+                                          opts.hcn_model_args, args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
     elif args.model == "simsiam":
-        model = models.builder_inter.SimSiam(
-            opts.bi_gru_model_args, opts.agcn_model_args, args.dim, args.pred_dim, args.moco_m, args.mlp)
-    else:
-        raise ValueError("model must be moco or simsiam")
+        model = models.builder_intra.SimSiam(
+            args.skeleton_representation, opts.bi_gru_model_args, opts.agcn_model_args, args.dim, args.pred_dim, args.mlp)
 
-    print(model)
     print("options", opts.train_feeder_args)
+    print(model)
 
     if args.gpu is not None:
         # torch.cuda.set_device(args.gpu)
@@ -145,13 +142,10 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.cuda()
         model = nn.DataParallel(model, device_ids=None)
         print('data parallel model used')
-        # comment out the following line for debugging
-        #raise NotImplementedError("Only DistributedDataParallel is supported.")
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     sim_loss = CosineSimLoss().cuda(args.gpu)
-    # sim_loss = nn.CosineSimilarity().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -181,29 +175,22 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    train_dataset = get_pretraining_set_inter(opts)
-
+    train_dataset = get_pretraining_set_intra(opts)
     train_sampler = None
-
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
     writer = SummaryWriter(args.checkpoint_path)
 
-    if not args.disable_wandb:
-        wandb.init(project="inter-skeleton", group="dev", config=args)
-        wandb.watch(model)
-
     for epoch in range(args.start_epoch, args.epochs):
 
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        loss, acc1, acc2 = train(train_loader, model, criterion, sim_loss, optimizer, epoch, args)
+        loss, acc1 = train(train_loader, model, criterion, sim_loss, optimizer, epoch, args)
         writer.add_scalar('train_loss', loss.avg, global_step=epoch)
-        writer.add_scalar('acc_s1', acc1.avg, global_step=epoch)
-        writer.add_scalar('acc_s2', acc2.avg, global_step=epoch)
+        writer.add_scalar('acc', acc1.avg, global_step=epoch)
 
         if epoch % 10 == 0:
             save_checkpoint({
@@ -216,69 +203,55 @@ def main_worker(gpu, ngpus_per_node, args):
 def train(train_loader, model, criterion, sim_loss, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4f')
-    s1_top1 = AverageMeter('S1_Acc@1', ':6.2f')
-    s2_top1 = AverageMeter('S2_Acc@1', ':6.2f')
-    meters = [batch_time, losses]
-    if args.model == 'moco':
-        meters += [s1_top1, s2_top1]
+    losses = AverageMeter('Loss', ':.4e')
+    top1 = AverageMeter('Acc@1', ':6.2f')
     progress = ProgressMeter(
-        len(train_loader), meters,
+        len(train_loader),
+        [batch_time, losses, top1, ],
         prefix="Epoch: [{}] Lr_rate [{}]".format(epoch, optimizer.param_groups[0]['lr']))
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for i, (input_s1_v1, input_s2_v1, input_s1_v2, input_s2_v2) in enumerate(train_loader):
+    for i, (input_v1, input_v2) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        inputs = [input_s1_v1, input_s2_v1, input_s1_v2, input_s2_v2]
+        inputs = [input_v1, input_v2]
         if args.gpu is not None:
             inputs[0] = inputs[0].float().cuda(args.gpu, non_blocking=True)
             inputs[1] = inputs[1].float().cuda(args.gpu, non_blocking=True)
-            inputs[2] = inputs[2].float().cuda(args.gpu, non_blocking=True)
-            inputs[3] = inputs[3].float().cuda(args.gpu, non_blocking=True)
-        # print(inputs[0].type(),inputs[1].type())
 
         if args.model == 'moco':
             # compute output
-            output, target = model(inputs[0], inputs[1], inputs[2], inputs[3])
+            output, target = model(inputs[0], inputs[1])
+            # print(inputs[0].size(),inputs[1].size(),output.size())
 
-            loss_1 = criterion(output[0], target[0])
-            loss_2 = criterion(output[1], target[1])
-            loss = loss_1 + loss_2
+            batch_size = output.size(0)
 
-            batch_size = output[0].size(0)
+            # compute loss
+            loss = criterion(output, target)
             losses.update(loss.item(), batch_size)
 
-            # measure accuracy of model s1 and s2 individually
+            # measure accuracy of model m1 and m2 individually
             # acc1/acc5 are (K+1)-way contrast classifier accuracy
             # measure accuracy and record loss
-            s1_acc1, _ = accuracy(output[0], target[0], topk=(1, 5))
-            s2_acc1, _ = accuracy(output[1], target[1], topk=(1, 5))
-            s1_top1.update(s1_acc1[0], batch_size)
-            s2_top1.update(s2_acc1[0], batch_size)
+            acc1, _ = accuracy(output, target, topk=(1, 5))
+            top1.update(acc1[0], batch_size)
 
-        elif args.model == 'simsiam':
-            q, r, k, l = model(inputs[0], inputs[1], inputs[2], inputs[3])
-
-            loss_1 = sim_loss(q, l).mean()
-            loss_2 = sim_loss(r, k).mean()
-            loss = (loss_1 + loss_2) * 0.5
-
+        else:
+            p, z = model(inputs[0], inputs[1])
             batch_size = inputs[0].size(0)
+            loss = sim_loss(p, z).mean()
             losses.update(loss.item(), batch_size)
 
-            # compute gradient and do SGD step
+        #print("input output size",output.size(),images[0].size(),half_size)
+
+        # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
-        # log on wandb
-        if not args.disable_wandb:
-            wandb.log(dict(loss=loss.item()))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -287,7 +260,7 @@ def train(train_loader, model, criterion, sim_loss, optimizer, epoch, args):
         if i % args.print_freq == 0:
             progress.display(i)
 
-    return losses, s1_top1, s2_top1
+    return losses, top1
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):

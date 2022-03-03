@@ -2,21 +2,11 @@
 import torch
 import torch.nn as nn
 
-
 from .GRU import BIGRU
 from .AGCN import Model as AGCN
 from .HCN import HCN
-
-
-def weights_init_gru(model):
-    # initilize weight
-    with torch.no_grad():
-        for child in list(model.children()):
-            print(child)
-            for param in list(child.parameters()):
-                if param.dim() == 2:
-                    nn.init.xavier_uniform_(param)
-    print('GRU weights initialization finished!')
+from .STGCN import Model as STGCN
+from .utils.misc import *
 
 
 class SimSiam(nn.Module):
@@ -24,7 +14,7 @@ class SimSiam(nn.Module):
     Build a SimSiam model with: a query encoder and a key encoder.
     """
 
-    def __init__(self, args_bi_gru, args_agcn, dim=128, pred_dim=512, mlp=False):
+    def __init__(self, args_bi_gru, args_agcn, dim=128, pred_dim=512, m=0.999, mlp=False):
         """
         dim: feature dimension (default: 128)
         pred_dim: hidden dimension of the predictor (default: 128)
@@ -34,20 +24,45 @@ class SimSiam(nn.Module):
         """
         super(SimSiam, self).__init__()
 
+        self.m = m
+
         # create encoders
-        self.encoder_seq = BIGRU(**args_bi_gru)
-        weights_init_gru(self.encoder_seq)
-        self.encoder_gcn = AGCN(**args_agcn)
+        self.encoder_q = BIGRU(**args_bi_gru)
+        self.encoder_k = BIGRU(**args_bi_gru)
+        weights_init_gru(self.encoder_q)
+        weights_init_gru(self.encoder_k)
 
-        # build 1-layer projection heads
-        if mlp:
-            dim_mlp_seq = self.encoder_seq.fc.weight.shape[1]
-            self.encoder_seq.fc = nn.Sequential(
-                nn.Linear(dim_mlp_seq, dim_mlp_seq), nn.ReLU(), self.encoder_seq.fc)
+        self.encoder_r = AGCN(**args_agcn)
+        self.encoder_l = AGCN(**args_agcn)
+        self.encoder_r.apply(weights_init_gcn)
+        self.encoder_l.apply(weights_init_gcn)
 
-            dim_mlp_gcn = self.encoder_gcn.fc.weight.shape[1]
-            self.encoder_gcn.fc = nn.Sequential(
-                nn.Linear(dim_mlp_gcn, dim_mlp_gcn), nn.ReLU(), self.encoder_gcn.fc)
+        # self.encoder_gcn = STGCN(in_channels=3, hidden_channels=64,
+        #                          hidden_dim=256, num_class=args_agcn['num_class'],
+        #                          graph_args={'layout': 'ntu-rgb+d', 'strategy': 'spatial'},
+        #                          edge_importance_weighting=True)
+
+        # projection heads
+        if mlp:  # hack: brute-force replacement
+            dim_mlp = self.encoder_q.fc.weight.shape[1]
+            self.encoder_q.fc = nn.Sequential(
+                nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
+            self.encoder_k.fc = nn.Sequential(
+                nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+
+            dim_mlp_2 = self.encoder_r.fc.weight.shape[1]
+            self.encoder_r.fc = nn.Sequential(
+                nn.Linear(dim_mlp_2, dim_mlp_2), nn.ReLU(), self.encoder_r.fc)
+            self.encoder_l.fc = nn.Sequential(
+                nn.Linear(dim_mlp_2, dim_mlp_2), nn.ReLU(), self.encoder_l.fc)
+
+        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
+
+        for param_r, param_l in zip(self.encoder_r.parameters(), self.encoder_l.parameters()):
+            param_l.data.copy_(param_r.data)  # initialize
+            param_l.requires_grad = False  # not update by gradient
 
         # build a 3-layer projector (like in original SimSiam)
         if False:
@@ -64,26 +79,25 @@ class SimSiam(nn.Module):
             self.encoder.fc[6].bias.requires_grad = False
 
         # build 2-layer predictors
-        self.predictor_seq = nn.Sequential(nn.Linear(dim, pred_dim, bias=False),
-                                           nn.BatchNorm1d(pred_dim),
+        self.predictor_seq = nn.Sequential(nn.Linear(dim, dim//2, bias=False),
+                                           nn.BatchNorm1d(dim//2),
                                            nn.ReLU(inplace=True),  # hidden layer
-                                           nn.Linear(pred_dim, dim))  # output layer
-        self.predictor_gcn = nn.Sequential(nn.Linear(dim, pred_dim, bias=False),
-                                           nn.BatchNorm1d(pred_dim),
+                                           nn.Linear(dim//2, dim))  # output layer
+        self.predictor_gcn = nn.Sequential(nn.Linear(dim, dim//2, bias=False),
+                                           nn.BatchNorm1d(dim//2),
                                            nn.ReLU(inplace=True),  # hidden layer
-                                           nn.Linear(pred_dim, dim))  # output layer
+                                           nn.Linear(dim//2, dim))  # output layer
 
-    def compute_feat_seq(self, emb):
-        feat = self.encoder_seq(emb)  # queries: NxC
-        feat = nn.functional.normalize(feat, dim=1)
-        feat_pred = self.predictor_seq(feat)
-        return feat, feat_pred
+    @torch.no_grad()
+    def _momentum_update_key_encoder(self):
+        """
+        Momentum update of the key encoders
+        """
+        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
-    def compute_feat_gcn(self, emb):
-        feat = self.encoder_gcn(emb)  # queries: NxC
-        feat = nn.functional.normalize(feat, dim=1)
-        feat_pred = self.predictor_gcn(feat)
-        return feat, feat_pred
+        for param_r, param_l in zip(self.encoder_r.parameters(), self.encoder_l.parameters()):
+            param_l.data = param_l.data * self.m + param_r.data * (1. - self.m)
 
     def forward(self, input_s1_v1, input_s2_v1, input_s1_v2, input_s2_v2):
         """
@@ -97,37 +111,25 @@ class SimSiam(nn.Module):
         """
 
         # compute query features for  s1 and  s2 skeleton representations
-        q, q_p = self.compute_feat_seq(input_s1_v1)
-        r, r_p = self.compute_feat_gcn(input_s2_v1)
+        q = self.encoder_q(input_s1_v1)  # queries: NxC
+        q = nn.functional.normalize(q, dim=1)
+        q = self.predictor_seq(q)
+
+        r = self.encoder_r(input_s2_v1)  # queries: NxC
+        r = nn.functional.normalize(r, dim=1)
+        r = self.predictor_gcn(r)
 
         # compute key features for  s1 and  s2  skeleton representations
-        k, k_p = self.compute_feat_seq(input_s1_v2)
-        l, l_p = self.compute_feat_gcn(input_s2_v2)
+        with torch.no_grad():  # no gradient to keys
+            self._momentum_update_key_encoder()  # update the key encoder
 
-        return (q.detach(), q_p), (r.detach(), r_p), (k.detach(), k_p), (l.detach(), l_p)
+            k = self.encoder_k(input_s1_v2)  # keys: NxC
+            k = nn.functional.normalize(k, dim=1)
 
-        # compute logits
-        # Einstein sum is more intuitive
-        # positive logits: Nx1,
-        # use  intra-skeleton contrast
-        # l_pos_seq = torch.einsum('nc,nc->n', [q, l]).unsqueeze(-1)  # query-s1 key-s2
-        # l_pos_graph = torch.einsum('nc,nc->n', [r, k]).unsqueeze(-1)  # query-s2 key-s1
+            l = self.encoder_l(input_s2_v2)  # keys: NxC
+            l = nn.functional.normalize(l, dim=1)
 
-        # # logits: Nx(1+K)
-        # # logits_seq = torch.cat([l_pos_seq], dim=1)
-        # # logits_graph = torch.cat([l_pos_graph], dim=1)
-        # logits_seq = l_pos_seq
-        # logits_graph = l_pos_graph
-
-        # # apply temperature
-        # logits_seq /= self.T
-        # logits_graph /= self.T
-
-        # # labels: positive key indicators
-        # labels_seq = torch.zeros(logits_seq.shape[0], dtype=torch.long).cuda()
-        # labels_graph = torch.zeros(logits_graph.shape[0], dtype=torch.long).cuda()
-
-        # return (logits_seq, logits_graph), (labels_seq, labels_graph)
+        return q, r, k, l
 
 
 class MoCo(nn.Module):

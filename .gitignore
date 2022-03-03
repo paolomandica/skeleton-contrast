@@ -1,7 +1,9 @@
 # Files and Folders
 data
 checkpoints
+wandb
 *.pth
+*.pt
 *.tar
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,python
