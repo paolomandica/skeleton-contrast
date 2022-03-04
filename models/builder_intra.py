@@ -48,39 +48,36 @@ class SimSiam(nn.Module):
             # self.encoder_q.apply(weights_init_gcn)
             # self.encoder_k.apply(weights_init_gcn)
 
-        # build 1-layer projection heads
         if mlp:
-            dim_mlp_q = self.encoder_q.fc.weight.shape[1]
-            self.encoder_q.fc = nn.Sequential(
-                nn.Linear(dim_mlp_q, dim_mlp_q), nn.ReLU(), self.encoder_q.fc)
-
-            dim_mlp_k = self.encoder_k.fc.weight.shape[1]
-            self.encoder_k.fc = nn.Sequential(
-                nn.Linear(dim_mlp_k, dim_mlp_k), nn.ReLU(), self.encoder_k.fc)
-
-        # build a 3-layer projector (like in original SimSiam)
-        if False:
-            prev_dim = self.encoder.fc.weight.shape[1]
-            self.encoder.fc = nn.Sequential(nn.Linear(prev_dim, prev_dim, bias=False),
-                                            nn.BatchNorm1d(prev_dim),
-                                            nn.ReLU(inplace=True),  # first layer
-                                            nn.Linear(prev_dim, prev_dim, bias=False),
-                                            nn.BatchNorm1d(prev_dim),
-                                            nn.ReLU(inplace=True),  # second layer
-                                            self.encoder.fc,
-                                            nn.BatchNorm1d(dim, affine=False))  # output layer
-            # hack: not use bias as it is followed by BN
-            self.encoder.fc[6].bias.requires_grad = False
+            self.add_projector(self.encoder_q, 3)
+            self.add_projector(self.encoder_k, 3)
 
         # build 2-layer predictors
-        self.predictor = nn.Sequential(nn.Linear(dim, dim//2, bias=False),
-                                       nn.BatchNorm1d(dim//2),
-                                       nn.ReLU(inplace=True),  # hidden layer
-                                       nn.Linear(dim//2, dim))  # output layer
+        hidden_dim = dim // 2
+        self.predictor = nn.Sequential(nn.Linear(dim, hidden_dim, bias=False),
+                                       nn.BatchNorm1d(hidden_dim),
+                                       nn.ReLU(inplace=True),
+                                       nn.Linear(hidden_dim, dim))
 
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data.copy_(param_q.data)  # initialize
             param_k.requires_grad = False  # not update by gradient
+
+    def add_projector(self, encoder=None, num_layers=1):
+        dim_mlp = encoder.fc.weight.shape[1]
+
+        if num_layers == 1:
+            encoder.fc = nn.Sequential(
+                nn.Linear(dim_mlp, dim_mlp), nn.BatchNorm1d(dim_mlp), nn.ReLU(), encoder.fc)
+
+        elif num_layers == 3:
+            encoder.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp, bias=False),
+                                       nn.BatchNorm1d(dim_mlp),
+                                       nn.ReLU(inplace=True),
+                                       nn.Linear(dim_mlp, dim_mlp, bias=False),
+                                       nn.BatchNorm1d(dim_mlp),
+                                       nn.ReLU(inplace=True),
+                                       encoder.fc)
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):

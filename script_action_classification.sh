@@ -1,6 +1,13 @@
 
 # Train a linear classifier on seq-based query encoder features pretrained via inter-skeleton contrast bewtween seq-based and graph-based representations
 
+# intra-skeleton seq-based
+CUDA_VISIBLE_DEVICES=0,1 python action_classification.py \
+--lr 0.1 --batch-size 256 \
+--pretrained ./checkpoints/intra_byol/checkpoint_0010.pth.tar \
+--finetune-dataset ntu60 --protocol cross_view \
+--pretrain-skeleton-representation graph-based  --finetune-skeleton-representation graph-based
+
 CUDA_VISIBLE_DEVICES=0,1,2,3 python action_classification.py \
   --lr 0.1 \
   --batch-size 64 \
