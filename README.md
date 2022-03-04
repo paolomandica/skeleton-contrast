@@ -16,6 +16,7 @@ This repository contains the implementation of our ACM MultiMedia 2021 paper:
 ```
  conda create -n  skeleton_contrast python=3.7 anaconda
  conda install pytorch==1.2.0 torchvision==0.4.0 -c pytorch
+ conda install -c conda-forge wandb
  pip install tensorboard
 
 ```
